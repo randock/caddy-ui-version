@@ -1,11 +1,11 @@
 package uiversion
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +18,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	defaultSQLiteOpenTimeout      = 60 * time.Second
+	defaultSQLiteReconnectInterval = 5 * time.Minute
+	defaultSQLiteMaxOpenConns     = 64
+	defaultSQLiteMaxIdleConns     = 64
+	defaultCacheClearInterval     = 15 * time.Minute
+)
+
 func init() {
 	caddy.RegisterModule(UIVersion{})
 	httpcaddyfile.RegisterHandlerDirective("ui_version", parseCaddyfile)
@@ -25,22 +33,27 @@ func init() {
 
 // UIVersion looks up the Host header in a SQLite database and sets
 // {http.vars.ui_version} so later directives (e.g. root) can select a site tree.
+//
+// Open the DB the same way as CoreDNS nameshift_context: a stable pool against
+// an immutable read-only URI. Publishers replace the file atomically (mv); pool
+// connections recycle every 5m so the new inode becomes visible. An in-memory
+// host cache is cleared every 15m so stale mappings do not linger longer than
+// that after an update.
 type UIVersion struct {
-	// SQLite is the path to the domains database.
+	// SQLite is the path / URI to the domains database. Prefer the CoreDNS
+	// style URI, e.g. file:/ui-versions.sqlite?immutable=1&mode=ro&nolock=1
 	SQLite string `json:"sqlite,omitempty"`
 
 	// Default is used when the host is missing from the database.
 	Default string `json:"default,omitempty"`
 
 	db     *sql.DB
-	stmt   *sql.Stmt
 	logger *zap.Logger
 
-	mu       sync.RWMutex
-	cache    map[string]string
-	dbPath   string
-	dbMtime  time.Time
-	dbOpened string
+	mu    sync.RWMutex
+	cache map[string]string
+
+	cacheClearStop context.CancelFunc
 }
 
 // CaddyModule returns the Caddy module information.
@@ -61,13 +74,33 @@ func (m *UIVersion) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("ui_version: sqlite path is required")
 	}
 	m.cache = make(map[string]string)
-	m.dbPath = m.SQLite
-	if err := m.openDB(); err != nil {
-		return err
+
+	db, err := sql.Open("sqlite", m.SQLite)
+	if err != nil {
+		return fmt.Errorf("ui_version: open sqlite: %w", err)
 	}
+	db.SetConnMaxIdleTime(60 * time.Second)
+	db.SetConnMaxLifetime(defaultSQLiteReconnectInterval)
+	db.SetMaxOpenConns(defaultSQLiteMaxOpenConns)
+	db.SetMaxIdleConns(defaultSQLiteMaxIdleConns)
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), defaultSQLiteOpenTimeout)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("ui_version: ping sqlite: %w", err)
+	}
+	m.db = db
+
+	clearCtx, clearStop := context.WithCancel(context.Background())
+	m.cacheClearStop = clearStop
+	go m.clearCacheLoop(clearCtx)
+
 	m.logger.Info("ui_version ready",
 		zap.String("sqlite", m.SQLite),
-		zap.String("default", m.Default))
+		zap.String("default", m.Default),
+		zap.Duration("conn_max_lifetime", defaultSQLiteReconnectInterval),
+		zap.Duration("cache_clear_interval", defaultCacheClearInterval))
 	return nil
 }
 
@@ -82,95 +115,34 @@ func (m *UIVersion) Validate() error {
 	return nil
 }
 
-// Cleanup closes the database.
+// Cleanup closes the database and stops the cache clearer.
 func (m *UIVersion) Cleanup() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.closeDBLocked()
-}
-
-func (m *UIVersion) openDB() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.openDBLocked()
-}
-
-func (m *UIVersion) openDBLocked() error {
-	if err := m.closeDBLocked(); err != nil {
+	if m.cacheClearStop != nil {
+		m.cacheClearStop()
+		m.cacheClearStop = nil
+	}
+	if m.db != nil {
+		err := m.db.Close()
+		m.db = nil
 		return err
 	}
-
-	info, err := os.Stat(m.dbPath)
-	if err != nil {
-		return fmt.Errorf("ui_version: stat sqlite: %w", err)
-	}
-
-	// Read-only, immutable-friendly open for a file replaced atomically by publishers.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)", m.dbPath)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return fmt.Errorf("ui_version: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("ui_version: ping sqlite: %w", err)
-	}
-
-	stmt, err := db.Prepare(`SELECT ui_version FROM domains WHERE name = ? LIMIT 1`)
-	if err != nil {
-		_ = db.Close()
-		return fmt.Errorf("ui_version: prepare: %w", err)
-	}
-
-	m.db = db
-	m.stmt = stmt
-	m.dbMtime = info.ModTime()
-	m.dbOpened = m.dbPath
-	m.cache = make(map[string]string)
 	return nil
 }
 
-func (m *UIVersion) closeDBLocked() error {
-	var err error
-	if m.stmt != nil {
-		err = m.stmt.Close()
-		m.stmt = nil
-	}
-	if m.db != nil {
-		if cerr := m.db.Close(); cerr != nil && err == nil {
-			err = cerr
+func (m *UIVersion) clearCacheLoop(ctx context.Context) {
+	ticker := time.NewTicker(defaultCacheClearInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			m.cache = make(map[string]string)
+			m.mu.Unlock()
+			m.logger.Info("ui_version: cleared host cache")
 		}
-		m.db = nil
 	}
-	return err
-}
-
-func (m *UIVersion) reloadIfChanged() {
-	info, err := os.Stat(m.dbPath)
-	if err != nil {
-		m.logger.Warn("ui_version: could not stat sqlite", zap.Error(err))
-		return
-	}
-	m.mu.RLock()
-	same := info.ModTime().Equal(m.dbMtime)
-	m.mu.RUnlock()
-	if same {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if info.ModTime().Equal(m.dbMtime) {
-		return
-	}
-	if err := m.openDBLocked(); err != nil {
-		m.logger.Error("ui_version: reload failed", zap.Error(err))
-		return
-	}
-	m.logger.Info("ui_version: reloaded sqlite", zap.Time("mtime", m.dbMtime))
 }
 
 func normalizeHost(host string) string {
@@ -182,22 +154,19 @@ func normalizeHost(host string) string {
 }
 
 func (m *UIVersion) lookup(host string) string {
-	m.reloadIfChanged()
-
 	m.mu.RLock()
 	if v, ok := m.cache[host]; ok {
 		m.mu.RUnlock()
 		return v
 	}
-	stmt := m.stmt
 	m.mu.RUnlock()
 
-	if stmt == nil {
+	if m.db == nil {
 		return m.Default
 	}
 
 	var version string
-	err := stmt.QueryRow(host).Scan(&version)
+	err := m.db.QueryRow(`SELECT ui_version FROM domains WHERE name = ? LIMIT 1`, host).Scan(&version)
 	if err == sql.ErrNoRows {
 		version = m.Default
 	} else if err != nil {
@@ -232,7 +201,7 @@ func (m UIVersion) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 //
 //	ui_version {
-//	    sqlite /ui-versions.sqlite
+//	    sqlite file:/ui-versions.sqlite?immutable=1&mode=ro&nolock=1
 //	    default original
 //	}
 func (m *UIVersion) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {

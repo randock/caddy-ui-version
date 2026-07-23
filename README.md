@@ -12,7 +12,7 @@ keyed by request host, and exposes it as `{http.vars.ui_version}`.
 
 :80 {
 	ui_version {
-		sqlite /ui-versions.sqlite
+		sqlite file:/ui-versions.sqlite?immutable=1&mode=ro&nolock=1
 		default original
 	}
 
@@ -35,10 +35,19 @@ CREATE TABLE domains (
 
 The sample DB maps `dagplannen.nl` → `modern`.
 
+## Update strategy
+
+Same model as CoreDNS `nameshift_context`:
+
+- Open a stable pool against an immutable read-only URI
+- Connections recycle every 5 minutes (`SetConnMaxLifetime`)
+- Publishers replace `/ui-versions.sqlite` atomically (`mv`)
+- In-memory host cache is cleared every 15 minutes
+
 ## Build
 
 ```sh
-xcaddy build --with github.com/randock/caddy-ui-version@v0.0.1
+xcaddy build --with github.com/randock/caddy-ui-version@v0.0.2
 ```
 
 ## Sample database

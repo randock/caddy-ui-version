@@ -33,7 +33,7 @@ func TestLookupModernAndDefault(t *testing.T) {
 	mustWriteSampleDB(t, dbPath)
 
 	m := &UIVersion{
-		SQLite:  dbPath,
+		SQLite:  "file:" + dbPath + "?immutable=1&mode=ro&nolock=1",
 		Default: "original",
 	}
 	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})

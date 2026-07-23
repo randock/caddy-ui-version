@@ -7,7 +7,7 @@
 
 :80 {
 	ui_version {
-		sqlite ./ui-versions.sqlite
+		sqlite file:./ui-versions.sqlite?immutable=1&mode=ro&nolock=1
 		default original
 	}
 
