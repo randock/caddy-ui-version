@@ -1,0 +1,15 @@
+{
+	log {
+		level debug
+	}
+	order ui_version before root
+}
+
+:80 {
+	ui_version {
+		sqlite ./ui-versions.sqlite
+		default original
+	}
+
+	respond "host={host} ui_version={http.vars.ui_version}"
+}

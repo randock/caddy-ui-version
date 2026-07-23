@@ -1,0 +1,4 @@
+*.sqlite
+!testdata/*.sqlite
+/caddy
+.dirac-cache/
