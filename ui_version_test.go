@@ -3,9 +3,11 @@ package uiversion
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
@@ -83,4 +85,44 @@ INSERT INTO domains (name, ui_version) VALUES ('dagplannen.nl', 'modern');
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestServeHTTPConcurrentCacheMisses runs many uncached lookups at once, as
+// happens after every cache clear. Run with -race; before the pointer-receiver
+// fix this crashed with "concurrent map read and map write".
+func TestServeHTTPConcurrentCacheMisses(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ui-versions.sqlite")
+	mustWriteSampleDB(t, dbPath)
+
+	m := &UIVersion{
+		SQLite:  "file:" + dbPath + "?immutable=1&mode=ro&nolock=1",
+		Default: "original",
+	}
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	defer cancel()
+	if err := m.Provision(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Cleanup() })
+
+	var handler caddyhttp.MiddlewareHandler = m
+	next := caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://d%d-%d.example/", i, j), nil)
+				req = req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, make(map[string]any)))
+				if err := handler.ServeHTTP(httptest.NewRecorder(), req, next); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }

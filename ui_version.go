@@ -27,7 +27,7 @@ const (
 )
 
 func init() {
-	caddy.RegisterModule(UIVersion{})
+	caddy.RegisterModule(new(UIVersion))
 	httpcaddyfile.RegisterHandlerDirective("ui_version", parseCaddyfile)
 }
 
@@ -57,7 +57,7 @@ type UIVersion struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (UIVersion) CaddyModule() caddy.ModuleInfo {
+func (*UIVersion) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.ui_version",
 		New: func() caddy.Module { return new(UIVersion) },
@@ -187,8 +187,11 @@ func (m *UIVersion) lookup(host string) string {
 	return version
 }
 
-// ServeHTTP implements caddyhttp.MiddlewareHandler.
-func (m UIVersion) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+// ServeHTTP implements caddyhttp.MiddlewareHandler. It must use a pointer
+// receiver: a value receiver copies mu on every request, so concurrent
+// requests stop excluding each other and the shared cache map crashes the
+// process with "concurrent map read and map write".
+func (m *UIVersion) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	host := normalizeHost(r.Host)
 	version := m.lookup(host)
 	caddyhttp.SetVar(r.Context(), "ui_version", version)
@@ -227,7 +230,7 @@ func (m *UIVersion) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 }
 
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	var m UIVersion
+	m := new(UIVersion)
 	err := m.UnmarshalCaddyfile(h.Dispenser)
 	return m, err
 }
