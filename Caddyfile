@@ -11,5 +11,5 @@
 		default original
 	}
 
-	respond "host={host} ui_version={http.vars.ui_version}"
+	respond "host={host} ui_version={http.vars.ui_version} ui_locale={http.vars.ui_locale}"
 }
