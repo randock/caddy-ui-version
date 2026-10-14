@@ -23,9 +23,12 @@ func main() {
 	_, err = db.Exec(`
 CREATE TABLE domains (
   name TEXT PRIMARY KEY NOT NULL,
-  ui_version TEXT NOT NULL
+  ui_version TEXT NOT NULL,
+  locale TEXT
 );
-INSERT INTO domains (name, ui_version) VALUES ('dagplannen.nl', 'modern');
+INSERT INTO domains (name, ui_version, locale) VALUES
+  ('dagplannen.nl', 'modern', NULL),
+  ('kas.nl', 'original', 'nl-nl');
 `)
 	if err != nil {
 		fatal(err)
