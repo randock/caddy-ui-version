@@ -397,3 +397,20 @@ func TestCacheResetsWhenFull(t *testing.T) {
 		t.Fatalf("kas.nl after reset -> %+v", got)
 	}
 }
+
+// TestLongKeyNotLookedUp: with key set the lookup key comes from the request
+// path, so a key longer than any DNS name must not reach the query or the cache.
+func TestLongKeyNotLookedUp(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ui-versions.sqlite")
+	mustExecDB(t, dbPath, newSchemaDB)
+	m := newTestHandler(t, immutableDSN(dbPath), "{http.regexp.d.1}")
+
+	repl := caddy.NewReplacer()
+	repl.Set("http.regexp.d.1", strings.Repeat("a", 296)+".kas.nl")
+	if version, locale := serve(t, m, "buy.nameshift.com", repl); version != "original" || locale != "" {
+		t.Fatalf("long key: ui_version=%#v ui_locale=%#v want original, \"\"", version, locale)
+	}
+	if n := cacheLen(m); n != 0 {
+		t.Fatalf("long key was cached (%d entries)", n)
+	}
+}

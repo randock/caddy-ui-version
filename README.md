@@ -87,7 +87,8 @@ Same model as CoreDNS `nameshift_context`:
 - Connections recycle every 5 minutes (`SetConnMaxLifetime`)
 - Publishers replace `/ui-versions.sqlite` atomically (`mv`)
 - In-memory host cache is cleared every 15 minutes, and reset when it reaches
-  100,000 entries
+  100,000 entries; keys longer than a DNS name (253 bytes) are neither looked
+  up nor cached
 - Query errors (e.g. a file caught mid-replace) are not cached, so the next
   request retries
 

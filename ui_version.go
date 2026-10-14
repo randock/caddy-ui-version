@@ -27,6 +27,10 @@ const (
 	defaultSQLiteMaxIdleConns     = 64
 	defaultCacheClearInterval     = 15 * time.Minute
 	defaultCacheMaxEntries        = 100_000
+
+	// maxHostLen is the longest DNS name. Longer keys cannot be a domain, so
+	// they are neither looked up nor cached.
+	maxHostLen = 253
 )
 
 // localeRe is the only locale shape exposed; anything else in the DB is
@@ -194,7 +198,7 @@ func normalizeLocale(locale string) string {
 }
 
 func (m *UIVersion) lookup(host string) domainUI {
-	if host == "" || m.db == nil {
+	if host == "" || len(host) > maxHostLen || m.db == nil {
 		return domainUI{version: m.Default}
 	}
 
@@ -220,7 +224,8 @@ func (m *UIVersion) lookup(host string) domainUI {
 
 	m.mu.Lock()
 	// With key set the host comes from the request path, so anyone can mint
-	// entries; start over rather than grow without bound.
+	// entries; start over rather than grow without bound. maxHostLen above
+	// bounds the size of each entry.
 	if len(m.cache) >= m.cacheMax {
 		m.cache = make(map[string]domainUI)
 	}
